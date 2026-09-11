@@ -120,6 +120,9 @@
             let pyodideRuntime = null;
             let pyodideLoadPromise = null;
             let pythonRunInProgress = false;
+            const PYTHON_PROJECT_DIR = '/codeplayground';
+            let pythonFsPaths = new Set();
+            let pythonFsDirectories = new Set();
 
             // --- VFS ---
             let files = {};
@@ -1809,6 +1812,89 @@
                 return mainFile || Object.values(files).find(file => file.language === 'python') || null;
             }
 
+            function getPythonFileId(file) {
+                return Object.keys(files).find(id => files[id] === file) || '';
+            }
+
+            async function preparePythonFilesystem(runtime) {
+                const pythonFiles = Object.entries(files).filter(([, file]) => file.language === 'python');
+                const filePaths = new Set(pythonFiles.map(([fileId]) => normalizeVfsPath(fileId)));
+                const directoryPaths = new Set();
+                filePaths.forEach(filePath => {
+                    const parts = filePath.split('/');
+                    parts.pop();
+                    while (parts.length) {
+                        directoryPaths.add(parts.join('/'));
+                        parts.pop();
+                    }
+                });
+                filePaths.forEach(filePath => {
+                    const parts = filePath.split('/');
+                    parts.pop();
+                    for (let index = 1; index <= parts.length; index += 1) {
+                        if (filePaths.has(parts.slice(0, index).join('/'))) {
+                            throw new Error(`Konflik path Python: ${parts.slice(0, index).join('/')} adalah file dan folder`);
+                        }
+                    }
+                });
+                pythonFsPaths.forEach(filePath => {
+                    if (!filePaths.has(filePath)) {
+                        try { runtime.FS.unlink(`${PYTHON_PROJECT_DIR}/${filePath}`); } catch (_) {}
+                    }
+                });
+                [...pythonFsDirectories].sort((left, right) => right.length - left.length).forEach(directoryPath => {
+                    if (!directoryPaths.has(directoryPath) || filePaths.has(directoryPath)) {
+                        try { runtime.FS.rmdir(`${PYTHON_PROJECT_DIR}/${directoryPath}`); } catch (_) {}
+                    }
+                });
+                runtime.FS.mkdirTree(PYTHON_PROJECT_DIR);
+                const currentPaths = new Set();
+                directoryPaths.forEach(directoryPath => {
+                    runtime.FS.mkdirTree(`${PYTHON_PROJECT_DIR}/${directoryPath}`);
+                    currentPaths.add(`${directoryPath}/__init__.py`);
+                    if (!filePaths.has(`${directoryPath}/__init__.py`)) {
+                        runtime.FS.writeFile(`${PYTHON_PROJECT_DIR}/${directoryPath}/__init__.py`, '');
+                    }
+                });
+                pythonFiles.forEach(([fileId, file]) => {
+                    const virtualPath = `${PYTHON_PROJECT_DIR}/${normalizeVfsPath(fileId)}`;
+                    const directory = virtualPath.slice(0, virtualPath.lastIndexOf('/'));
+                    runtime.FS.mkdirTree(directory);
+                    runtime.FS.writeFile(virtualPath, file.committedContent);
+                    currentPaths.add(normalizeVfsPath(fileId));
+                });
+                pythonFsPaths.forEach(filePath => {
+                    if (!currentPaths.has(filePath)) {
+                        try { runtime.FS.unlink(`${PYTHON_PROJECT_DIR}/${filePath}`); } catch (_) {}
+                    }
+                });
+                pythonFsPaths = currentPaths;
+                pythonFsDirectories = directoryPaths;
+                const importDirectories = [...directoryPaths]
+                    .sort((left, right) => left.split('/').length - right.split('/').length)
+                    .map(directoryPath => `${PYTHON_PROJECT_DIR}/${directoryPath}`);
+                await runtime.runPythonAsync(`import sys\nimport_directories = ${JSON.stringify([PYTHON_PROJECT_DIR, ...importDirectories])}\nfor directory in import_directories:\n    while directory in sys.path:\n        sys.path.remove(directory)\nfor directory in reversed(import_directories):\n    sys.path.insert(0, directory)`);
+            }
+
+            function getPythonExternalImportSource(source, localModuleNames) {
+                return source.split('\n').map(line => {
+                    const fromMatch = line.match(/^(\s*from\s+)(\.*(?:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)?)/);
+                    if (fromMatch && (fromMatch[2].startsWith('.') || localModuleNames.has(fromMatch[2].split('.')[0]))) return '';
+                    const importMatch = line.match(/^(\s*import\s+)(.+)$/);
+                    if (!importMatch) return line;
+                    const imports = importMatch[2].split(',').filter(item => {
+                        const moduleName = item.trim().split(/\s+as\s+/)[0].split('.')[0];
+                        return !localModuleNames.has(moduleName);
+                    });
+                    return imports.length ? importMatch[1] + imports.join(',') : '';
+                }).join('\n');
+            }
+
+            function getPythonModuleName(fileId) {
+                const normalized = normalizeVfsPath(fileId).replace(/\.py$/i, '');
+                return normalized.split('/').join('.');
+            }
+
             async function runPythonCode() {
                 if (pythonRunInProgress) return;
                 const file = getPythonEntryFile();
@@ -1822,20 +1908,39 @@
                 const originalLabel = runPythonBtn.querySelector('span')?.textContent || 'Python';
                 if (runPythonBtn.querySelector('span')) runPythonBtn.querySelector('span').textContent = 'Loading';
                 openConsole();
+                clearConsole();
                 addConsoleEntry('info', `Python: ${activeFileId === Object.keys(files).find(id => files[id] === file) ? activeFileId : 'main.py'}`);
+                let runtime = null;
                 try {
-                    const runtime = await loadPyodideRuntime();
+                    runtime = await loadPyodideRuntime();
+                    await preparePythonFilesystem(runtime);
                     runtime.setStdout({ batched: text => addConsoleEntry('info', text) });
                     runtime.setStderr({ batched: text => addConsoleEntry('error', text) });
-                    if (typeof runtime.loadPackagesFromImports === 'function') await runtime.loadPackagesFromImports(source);
+                    if (typeof runtime.loadPackagesFromImports === 'function') {
+                        const localModuleNames = new Set(Object.keys(files).filter(id => files[id].language === 'python')
+                            .map(id => normalizeVfsPath(id).split('/')[0].replace(/\.py$/i, '')));
+                        const packageSources = Object.values(files)
+                            .filter(candidate => candidate.language === 'python')
+                            .map(candidate => getPythonExternalImportSource(candidate.committedContent, localModuleNames));
+                        for (const packageSource of packageSources) {
+                            await runtime.loadPackagesFromImports(packageSource);
+                        }
+                    }
                     if (runPythonBtn.querySelector('span')) runPythonBtn.querySelector('span').textContent = 'Running';
-                    const result = await runtime.runPythonAsync(source);
+                    const entryPath = `${PYTHON_PROJECT_DIR}/${normalizeVfsPath(getPythonFileId(file))}`;
+                    const entryFileId = getPythonFileId(file);
+                    const entryModule = getPythonModuleName(entryFileId);
+                    const execution = entryFileId.includes('/') ?
+                        `import runpy\nrunpy.run_module(${JSON.stringify(entryModule)}, run_name='__main__')` :
+                        `import runpy\nrunpy.run_path(${JSON.stringify(entryPath)}, run_name='__main__')`;
+                    const result = await runtime.runPythonAsync(execution);
                     if (result && typeof result.destroy === 'function') result.destroy();
                     addConsoleEntry('info', 'Python selesai');
                 } catch (error) {
                     addConsoleEntry('error', `Python gagal: ${error?.message || error}`);
                     showToast('⚠️ Eksekusi Python gagal');
                 } finally {
+                    try { runtime?.setStdout(); runtime?.setStderr(); } catch (_) {}
                     pythonRunInProgress = false;
                     runPythonBtn.disabled = false;
                     if (runPythonBtn.querySelector('span')) runPythonBtn.querySelector('span').textContent = originalLabel;
