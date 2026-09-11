@@ -119,7 +119,7 @@
             let selectedFileId = 'index.html';
             let openFileIds = [];
             let dependencyIssues = [];
-            const fileOrder = ['index.html', 'style.css', 'script.js'];
+            const fileOrder = ['index.html', 'style.css', 'script.js', 'main.py'];
 
             // --- Editor instances ---
             let editors = {};
@@ -154,7 +154,7 @@
                         const f = data.files[id];
                         if (!validateFileName(id) || !f || typeof f !== 'object' || typeof f.content !== 'string' ||
                             f.content.length > MAX_FILE_SIZE ||
-                            (f.type === 'asset' ? typeof f.mime !== 'string' : !['html', 'css', 'javascript'].includes(f.language))) {
+                            (f.type === 'asset' ? typeof f.mime !== 'string' : !['html', 'css', 'javascript', 'python'].includes(f.language))) {
                             console.warn('Invalid file entry, removing:', id);
                             delete data.files[id];
                         }
@@ -474,7 +474,7 @@
 
             function getLanguageFromFileName(name) {
                 const extension = name.split('.').pop().toLowerCase();
-                return extension === 'html' ? 'html' : extension === 'css' ? 'css' : extension === 'js' ? 'javascript' : 'asset';
+                return extension === 'html' ? 'html' : extension === 'css' ? 'css' : extension === 'js' ? 'javascript' : extension === 'py' ? 'python' : 'asset';
             }
 
             function isCodeFile(file) {
@@ -564,7 +564,7 @@
                 if (candidates.length === 0) return null;
                 const preferred = candidates.find(id => id === preferredName);
                 if (preferred) return preferred;
-                const rootIndex = candidates.find(id => id.toLowerCase() === 'index.' + (language === 'html' ? 'html' : language === 'css' ? 'css' : 'js'));
+                const rootIndex = candidates.find(id => id.toLowerCase() === 'index.' + (language === 'html' ? 'html' : language === 'css' ? 'css' : language === 'python' ? 'py' : 'js'));
                 return rootIndex || (candidates.length === 1 ? candidates[0] : null);
             }
 
@@ -989,7 +989,7 @@
                     const pattern = /url\(\s*(["']?)([^"')]+)\1\s*\)|@import\s+(?:(["'])([^"']+)\3|url\((["']?)([^"')]+)\5\))/gi;
                     let match;
                     while ((match = pattern.exec(content))) callback(match[2] || match[4] || match[6], './', match.index, match[0]);
-                } else {
+                } else if (file.language === 'javascript') {
                     const pattern = /\b(?:import\s+(?:(?:[A-Za-z_$][\w$]*|\*|\{|\}|,|\s)+?\s*from\s*)?|export\s+(?:[A-Za-z_$][\w$]*|\*|\{|\}|,|\s)+?\s*from\s*)["']([^"']+)["']|\bimport\(\s*["']([^"']+)["']\s*\)/g;
                     let match;
                     while ((match = pattern.exec(content))) callback(match[1] || match[2], './', match.index, match[0]);
@@ -1775,6 +1775,8 @@
                     else if (f.language === 'css') icon.innerHTML = '<i class="fab fa-css3-alt" style="color:#2965f1;"></i>';
                     else if (f.language === 'javascript') icon.innerHTML =
                         '<i class="fab fa-js" style="color:#f7df1e;"></i>';
+                    else if (f.language === 'python') icon.innerHTML =
+                        '<i class="fab fa-python" style="color:#3776ab;"></i>';
                     else icon.innerHTML = '<i class="fas fa-file"></i>';
                     const name = document.createElement('span');
                     name.className = 'file-name';
@@ -1816,7 +1818,7 @@
                 });
                 order.forEach(id => {
                     const f = files[id];
-                    const keyMap = { html: 'html', css: 'css', javascript: 'js' };
+                    const keyMap = { html: 'html', css: 'css', javascript: 'js', python: 'python' };
                     const editorKey = keyMap[f.language] || 'html';
                     const btn = document.createElement('div');
                     btn.className = 'editor-tab-btn' + (id === activeFileId ? ' active' : '') + (f.dirty ? ' dirty' :
@@ -1889,7 +1891,7 @@
                 selectedFileId = id;
                 const f = files[id];
                 const lang = f.language;
-                const keyMap = { html: 'html', css: 'css', javascript: 'js' };
+                const keyMap = { html: 'html', css: 'css', javascript: 'js', python: 'python' };
                 const editorKey = keyMap[lang] || 'html';
 
                 const editor = editors[editorKey];
@@ -1898,7 +1900,7 @@
                     editor.focus();
                 }
 
-                const slotMap = { html: 'htmlEditorSlot', css: 'cssEditorSlot', js: 'jsEditorSlot' };
+                const slotMap = { html: 'htmlEditorSlot', css: 'cssEditorSlot', js: 'jsEditorSlot', python: 'pythonEditorSlot' };
                 Object.keys(slotMap).forEach(k => {
                     document.getElementById(slotMap[k]).classList.toggle('active', k === editorKey);
                 });
@@ -1928,7 +1930,7 @@
                 if (activeFileId) {
                     switchFile(activeFileId);
                 } else {
-                    ['html', 'css', 'js'].forEach(key => editors[key]?.setModel(null));
+                    ['html', 'css', 'js', 'python'].forEach(key => editors[key]?.setModel(null));
                     document.querySelectorAll('.editor-slot').forEach(slot => slot.classList.remove('active'));
                     renderFileUI();
                 }
@@ -1938,7 +1940,7 @@
             //  FILE OPERATIONS
             // ============================================================
             function createNewFile() {
-                const requestedName = prompt('Nama file (contoh: about.html, utils.js):', 'newfile.js');
+                const requestedName = prompt('Nama file (contoh: about.html, utils.py):', 'newfile.py');
                 if (!requestedName) return;
                 const name = normalizeFileName(requestedName);
                 if (!validateFileName(name)) { showToast('⚠️ Nama file tidak valid'); return; }
@@ -1948,7 +1950,8 @@
                 if (ext === 'html') lang = 'html';
                 else if (ext === 'css') lang = 'css';
                 else if (ext === 'js') lang = 'javascript';
-                else { showToast('⚠️ Ekstensi tidak didukung (.html, .css, .js)'); return; }
+                else if (ext === 'py') lang = 'python';
+                else { showToast('⚠️ Ekstensi tidak didukung (.html, .css, .js, .py)'); return; }
 
                 const model = monaco.editor.createModel('', lang);
                 const newFile = { content: '', committedContent: '', language: lang, dirty: false, model: model };
@@ -2002,7 +2005,12 @@
                 if (selectedFileId === id) selectedFileId = nextActiveFileId;
                 renderFileList();
                 renderTabs();
-                switchFile(activeFileId);
+                if (activeFileId) {
+                    switchFile(activeFileId);
+                } else {
+                    ['html', 'css', 'js', 'python'].forEach(key => editors[key]?.setModel(null));
+                    document.querySelectorAll('.editor-slot').forEach(slot => slot.classList.remove('active'));
+                }
                 showToast('🗑️ File dihapus: ' + id);
             }
 
@@ -2015,14 +2023,14 @@
                 if (!validateFileName(newName)) { showToast('⚠️ Nama file tidak valid'); return; }
                 if (files[newName]) { showToast('⚠️ Nama sudah dipakai'); return; }
                 const ext = newName.split('.').pop().toLowerCase();
-                if (!['html', 'css', 'js'].includes(ext)) { showToast('⚠️ Ekstensi harus .html, .css, atau .js'); return; }
+                if (!['html', 'css', 'js', 'py'].includes(ext)) { showToast('⚠️ Ekstensi harus .html, .css, .js, atau .py'); return; }
                 const oldExt = oldName.split('.').pop().toLowerCase();
                 if (oldExt !== ext) {
                     showToast('⚠️ Rename tidak boleh mengubah jenis file');
                     return;
                 }
-                const langMap = { html: 'html', css: 'css', js: 'javascript' };
-                const newLang = langMap[ext] || 'javascript';
+                const langMap = { html: 'html', css: 'css', js: 'javascript', py: 'python' };
+                const newLang = langMap[ext] || 'python';
 
                 const oldModel = files[oldName].model;
                 const oldContent = oldModel.getValue();
@@ -2175,7 +2183,7 @@
                     showToast('⚠️ Asset tidak dapat diformat');
                     return;
                 }
-                const keyMap = { html: 'html', css: 'css', javascript: 'js' };
+                const keyMap = { html: 'html', css: 'css', javascript: 'js', python: 'python' };
                 const editorKey = keyMap[f.language] || 'html';
                 const editor = editors[editorKey];
                 if (!editor) { showToast('⚠️ Editor tidak tersedia'); return; }
@@ -2211,7 +2219,7 @@
                     return;
                 }
                 const ext = file.name.split('.').pop().toLowerCase();
-                const isCode = ['html', 'css', 'js'].includes(ext);
+                const isCode = ['html', 'css', 'js', 'py'].includes(ext);
                 const reader = new FileReader();
                 reader.onload = (ev) => {
                     const content = ev.target.result;
@@ -2460,8 +2468,12 @@
                     model: null,
                     ...commonOpts
                 });
+                const pythonEditor = monaco.editor.create(document.getElementById('pythonEditorSlot'), {
+                    model: null,
+                    ...commonOpts
+                });
 
-                editors = { html: htmlEditor, css: cssEditor, js: jsEditor };
+                editors = { html: htmlEditor, css: cssEditor, js: jsEditor, python: pythonEditor };
                 return editors;
             }
 
@@ -2524,7 +2536,7 @@
                 Object.keys(files).forEach(id => {
                     const f = files[id];
                         if (!isCodeFile(f)) return;
-                    const keyMap = { html: 'html', css: 'css', javascript: 'js' };
+                    const keyMap = { html: 'html', css: 'css', javascript: 'js', python: 'python' };
                     const editorKey = keyMap[f.language] || 'html';
                     if (editors[editorKey] && editors[editorKey].getModel() === null) {
                         editors[editorKey].setModel(f.model);
@@ -2532,10 +2544,10 @@
                 });
 
                 // Pastikan semua editor punya model
-                ['html', 'css', 'js'].forEach(key => {
+                ['html', 'css', 'js', 'python'].forEach(key => {
                     if (editors[key] && editors[key].getModel() === null) {
                         const found = Object.keys(files).find(id => {
-                            const km = { html: 'html', css: 'css', javascript: 'js' };
+                            const km = { html: 'html', css: 'css', javascript: 'js', python: 'python' };
                             return km[files[id].language] === key;
                         });
                         if (found) {
@@ -2549,17 +2561,17 @@
                 renderTabs();
                 const active = files[activeFileId];
                 if (active) {
-                    const keyMap = { html: 'html', css: 'css', javascript: 'js' };
+                    const keyMap = { html: 'html', css: 'css', javascript: 'js', python: 'python' };
                     const editorKey = keyMap[active.language] || 'html';
                     if (editors[editorKey]) {
                         editors[editorKey].setModel(active.model);
                     }
-                    const slotMap = { html: 'htmlEditorSlot', css: 'cssEditorSlot', js: 'jsEditorSlot' };
+                    const slotMap = { html: 'htmlEditorSlot', css: 'cssEditorSlot', js: 'jsEditorSlot', python: 'pythonEditorSlot' };
                     Object.keys(slotMap).forEach(k => {
                         document.getElementById(slotMap[k]).classList.toggle('active', k === editorKey);
                     });
                 } else {
-                    ['html', 'css', 'js'].forEach(key => editors[key]?.setModel(null));
+                    ['html', 'css', 'js', 'python'].forEach(key => editors[key]?.setModel(null));
                     document.querySelectorAll('.editor-slot').forEach(slot => slot.classList.remove('active'));
                 }
 
