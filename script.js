@@ -112,6 +112,7 @@
             let persistenceDirty = true;
             let persistenceFlushed = false;
             let moduleBundleLimitNotified = false;
+            let previewContents = null;
 
             // --- VFS ---
             let files = {};
@@ -230,6 +231,7 @@
             }
 
             function getCurrentContent(file) {
+                if (previewContents && file && previewContents.has(file)) return previewContents.get(file);
                 return file && file.model ? file.model.getValue() : (file ? file.content : '');
             }
 
@@ -480,7 +482,8 @@
             }
 
             function getAssetDataUrl(file) {
-                return file && getFileType(file) === 'asset' && typeof file.content === 'string' ? file.content : '';
+                const content = getCurrentContent(file);
+                return file && getFileType(file) === 'asset' && typeof content === 'string' ? content : '';
             }
 
             function splitSrcsetCandidates(value, includeDescriptors = false) {
@@ -1500,6 +1503,15 @@
 
             function buildPreview() {
                 syncAllFileState();
+                previewContents = new Map(Object.values(files).map(file => [file, file.committedContent]));
+                try {
+                    buildPreviewFromSavedContent();
+                } finally {
+                    previewContents = null;
+                }
+            }
+
+            function buildPreviewFromSavedContent() {
                 revokeNativeModuleUrls();
                 moduleBundleLimitNotified = false;
                 const project = getPreviewProject();
@@ -2171,7 +2183,10 @@
             function saveAll(showToastMsg = true) {
                 const saved = commitAllFiles();
                 renderFileUI();
-                if (showToastMsg && saved) showToast('💾 Semua disimpan');
+                if (saved) {
+                    buildPreview();
+                    if (showToastMsg) showToast('💾 Semua disimpan');
+                }
                 return saved;
             }
 
@@ -2196,7 +2211,7 @@
                     setPreviewStatus('live');
                     previewStatusTimer = null;
                 }, 300);
-                showToast(hasDirtyFiles() ? '▶️ Kode dijalankan (draft)' : '✅ Kode dijalankan');
+                showToast(hasDirtyFiles() ? '▶️ Preview memakai versi tersimpan. Simpan untuk menerapkan draft.' : '✅ Kode dijalankan');
             }
 
             // ============================================================
