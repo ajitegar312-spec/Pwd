@@ -137,14 +137,23 @@
                 try {
                     const raw = localStorage.getItem(STORAGE_KEY);
                     if (!raw) return null;
+                    if (raw.length > MAX_STORAGE_PAYLOAD_SIZE) {
+                        console.warn('Stored data exceeds the maximum payload size, using defaults');
+                        return null;
+                    }
                     const data = JSON.parse(raw);
                     if (!data || typeof data !== 'object' || !data.files || typeof data.files !== 'object') {
                         console.warn('Invalid data structure, using defaults');
                         return null;
                     }
+                    if (Object.keys(data.files).length > MAX_FILE_COUNT) {
+                        console.warn('Stored file count exceeds the maximum, using defaults');
+                        return null;
+                    }
                     for (const id of Object.keys(data.files)) {
                         const f = data.files[id];
                         if (!validateFileName(id) || !f || typeof f !== 'object' || typeof f.content !== 'string' ||
+                            f.content.length > MAX_FILE_SIZE ||
                             (f.type === 'asset' ? typeof f.mime !== 'string' : !['html', 'css', 'javascript'].includes(f.language))) {
                             console.warn('Invalid file entry, removing:', id);
                             delete data.files[id];
@@ -476,6 +485,28 @@
                 return file && getFileType(file) === 'asset' && typeof file.content === 'string' ? file.content : '';
             }
 
+            function splitSrcsetCandidates(value, includeDescriptors = false) {
+                const candidates = [];
+                let start = 0;
+                let dataUrlEnd = -1;
+                for (let index = 0; index <= value.length; index += 1) {
+                    const character = value[index];
+                    if (index === start) {
+                        const candidateStart = value.slice(start).search(/\S/);
+                        dataUrlEnd = candidateStart >= 0 && value.slice(start + candidateStart).startsWith('data:') ?
+                            start + candidateStart : -1;
+                    }
+                    if (dataUrlEnd >= 0 && index > dataUrlEnd && /\s/.test(character)) dataUrlEnd = -1;
+                    if ((character === ',' && dataUrlEnd < 0) || index === value.length) {
+                        const candidate = value.slice(start, index).trim();
+                            if (candidate) candidates.push(includeDescriptors ? candidate : candidate.split(/\s+/, 1)[0]);
+                        start = index + 1;
+                        dataUrlEnd = -1;
+                    }
+                }
+                return candidates;
+            }
+
             function inlineLocalAssets(doc, baseHref, sourceFileId) {
                 doc.querySelectorAll('img[src], source[src], video[poster], object[data], iframe[src], audio[src], track[src], embed[src], input[src], link[rel~="icon"]').forEach(node => {
                     const attributeName = node.hasAttribute('poster') ? 'poster' : node.hasAttribute('data') ? 'data' : 'href' in node && node.tagName.toLowerCase() === 'link' ? 'href' : 'src';
@@ -484,7 +515,7 @@
                     if (dataUrl) node.setAttribute(attributeName, dataUrl);
                 });
                 doc.querySelectorAll('img[srcset], source[srcset]').forEach(node => {
-                    const rewritten = node.getAttribute('srcset').split(',').map(candidate => {
+                    const rewritten = splitSrcsetCandidates(node.getAttribute('srcset'), true).map(candidate => {
                         const parts = candidate.trim().split(/\s+/);
                         const fileId = getAssetFileId(parts[0], 'resource', baseHref, sourceFileId, true);
                         const dataUrl = getAssetDataUrl(files[fileId]);
@@ -802,9 +833,9 @@
                 return !url || /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(url.trim());
             }
 
-            function isCheckableCodeReference(reference, language) {
+            function isCheckableCodeReference(reference, language, allowBare = false) {
                 const path = reference.split(/[?#]/, 1)[0];
-                if (!isLocalVfsReference(path)) return false;
+                if (!isLocalVfsReference(path, allowBare)) return false;
                 return language === 'css' ? /\.css$/i.test(path) : language === 'javascript' &&
                     (/\.js$/i.test(path) || !path.includes('.'));
             }
@@ -815,7 +846,7 @@
                     doc.querySelectorAll(selector).forEach(node => {
                         const value = node.getAttribute(attribute);
                         if (!value) return;
-                        const values = splitSrcset ? value.split(',').map(item => item.trim().split(/\s+/, 1)[0]) : [value];
+                        const values = splitSrcset ? splitSrcsetCandidates(value) : [value];
                         values.forEach(reference => references.push({ reference, language }));
                     });
                 };
@@ -851,36 +882,61 @@
                             if (dependency) dependencies.add(dependency);
                         });
                         doc.querySelectorAll('script[type="module"]:not([src])').forEach(node => {
-                            getModuleSpecifiers(node.textContent).forEach(specifier => {
-                                const dependency = resolveDependency(specifier, 'javascript', baseHref, fileId);
+                            findNativeModuleSpecifiers(node.textContent).forEach(specifier => {
+                                const dependency = resolveDependency(specifier.value, 'javascript', baseHref, fileId);
                                 if (dependency) dependencies.add(dependency);
                             });
                         });
                     } else if (file.language === 'css') {
-                        const importPattern = /@import\s+(?:["']([^"']+)["']|url\(["']?([^"')]+)["']?\))/gi;
-                        let match;
-                        while ((match = importPattern.exec(content))) {
-                            const dependency = resolveDependency(match[1] || match[2], 'css', './', fileId, true);
+                        replaceCssMatches(content, /@import\s+(?:["']([^"']+)["']|url\(["']?([^"')]+)["']?\))/gi,
+                            (match, quotedPath, urlPath) => {
+                            const dependency = resolveDependency(quotedPath || urlPath, 'css', './', fileId, true);
                             if (dependency) dependencies.add(dependency);
-                        }
+                            return match;
+                        });
                     } else if (file.language === 'javascript') {
-                        const importPattern = /\b(?:import\s+(?:(?:[A-Za-z_$][\w$]*|\*|\{|\}|,|\s)+?\s*from\s*)?|export\s+(?:[A-Za-z_$][\w$]*|\*|\{|\}|,|\s)+?\s*from\s*)["']([^"']+)["']/g;
-                        const dynamicImportPattern = /\bimport\(\s*["']([^"']+)["']\s*\)/g;
-                        let match;
-                        while ((match = importPattern.exec(content))) {
-                            const dependency = resolveDependency(match[1], 'javascript', './', fileId);
+                        findNativeModuleSpecifiers(content).forEach(specifier => {
+                            const dependency = resolveDependency(specifier.value, 'javascript', './', fileId);
                             if (dependency) dependencies.add(dependency);
-                        }
-                        while ((match = dynamicImportPattern.exec(content))) {
-                            const dependency = resolveDependency(match[1], 'javascript', './', fileId);
-                            if (dependency) dependencies.add(dependency);
-                        }
+                        });
                     }
                     dependencies.forEach(visit);
                 };
                 const entrypoint = getBestFile('html', previewPageId) || getBestFile('html', 'index.html');
                 visit(entrypoint);
                 return graph;
+            }
+
+            function addBrokenCodeReferences(broken, content, fileId, language, baseHref = './') {
+                const references = [];
+                if (language === 'javascript') {
+                    findNativeModuleSpecifiers(content).forEach(specifier => references.push(specifier.value));
+                } else {
+                    replaceCssMatches(content, /@import\s+(?:["']([^"']+)["']|url\(\s*["']?([^"')]+)["']?\s*\))/gi,
+                        (match, quotedPath, urlPath) => {
+                            references.push(quotedPath || urlPath);
+                            return match;
+                        });
+                }
+                references.forEach(reference => {
+                    if (!isExternalReference(reference) && isCheckableCodeReference(reference, language, language === 'css') &&
+                        !getAssetFileId(reference, language, baseHref, fileId, language === 'css')) {
+                        broken.push(`${fileId}: ${reference}`);
+                    }
+                });
+            }
+
+            function addBrokenCssAssetReferences(broken, content, fileId, baseHref = './') {
+                replaceCssMatches(content, /url\(\s*["']?([^"')]+)["']?\s*\)/gi, (match, rawReference, matchIndex) => {
+                    const reference = rawReference.trim();
+                    const beforeMatch = content.slice(0, matchIndex);
+                    if (/@import\s+[^;]*$/i.test(beforeMatch)) return match;
+                    if (isExternalReference(reference)) return match;
+                    if (!isExternalReference(reference) && !getAssetFileId(reference, 'resource', baseHref, fileId, true)) {
+                        broken.push(`${fileId}: ${reference}`);
+                    }
+                    return match;
+                });
             }
 
             function findBrokenLocalReferences() {
@@ -893,32 +949,23 @@
                             broken.push(`${id}: ${reference}`);
                         }
                     });
+                    doc.querySelectorAll('style').forEach(node => {
+                        addBrokenCodeReferences(broken, node.textContent, id, 'css', baseHref);
+                        addBrokenCssAssetReferences(broken, node.textContent, id, baseHref);
+                    });
+                    doc.querySelectorAll('script:not([src])').forEach(node => {
+                        if ((node.getAttribute('type') || '').toLowerCase() === 'module') {
+                            addBrokenCodeReferences(broken, node.textContent, id, 'javascript', baseHref);
+                        }
+                    });
                 });
                 Object.keys(files).forEach(id => {
                     const file = files[id];
                     const content = getCurrentContent(file);
-                    const references = file.language === 'javascript' ?
-                        [...content.matchAll(/\b(?:import\s+(?:(?:[A-Za-z_$][\w$]*|\*|\{|\}|,|\s)+?\s*from\s*)?|export\s+(?:[A-Za-z_$][\w$]*|\*|\{|\}|,|\s)+?\s*from\s*)["']([^"']+)["']/g),
-                            ...content.matchAll(/\bimport\(\s*["']([^"']+)["']\s*\)/g)].map(m => m[1]) :
-                        file.language === 'css' ? [
-                            ...content.matchAll(/@import\s+(?:["']([^"']+)["']|url\(\s*["']?([^"')]+)["']?\s*\))/gi)
-                        ].map(m => m[1] || m[2]) : [];
-                    references.forEach(reference => {
-                        const language = file.language === 'javascript' ? 'javascript' : 'css';
-                        if (!isExternalReference(reference) && isCheckableCodeReference(reference, language) &&
-                            !getAssetFileId(reference, language, './', id, language === 'css')) {
-                            broken.push(`${id}: ${reference}`);
-                        }
-                    });
+                    if (file.language === 'javascript') addBrokenCodeReferences(broken, content, id, 'javascript');
+                    if (file.language === 'css') addBrokenCodeReferences(broken, content, id, 'css');
                     if (file.language === 'css') {
-                        [...content.matchAll(/url\(\s*["']?([^"')]+)["']?\s*\)/gi)].forEach(match => {
-                            const reference = match[1].trim();
-                            const beforeMatch = content.slice(0, match.index);
-                            if (/@import\s+[^;]*$/i.test(beforeMatch)) return;
-                            if (!isExternalReference(reference) && !getAssetFileId(reference, 'resource', './', id, true)) {
-                                broken.push(`${id}: ${reference}`);
-                            }
-                        });
+                        addBrokenCssAssetReferences(broken, content, id);
                     }
                 });
                 return broken;
@@ -1011,7 +1058,7 @@
                         });
                         doc.querySelectorAll('[srcset]').forEach(node => {
                             const reference = node.getAttribute('srcset');
-                            const rewritten = reference.split(',').map(candidate => {
+                            const rewritten = splitSrcsetCandidates(reference, true).map(candidate => {
                                 const parts = candidate.trim().split(/\s+/);
                                 if (parts[0]) parts[0] = rewriteValue(parts[0], 'resource');
                                 return parts.join(' ');
@@ -1244,7 +1291,7 @@
                     replacements.push({
                         start: match.index,
                         end: match.index + match[0].length,
-                        value: replacer(...match)
+                        value: replacer(...match, match.index)
                     });
                 }
                 return replacements.reverse().reduce((result, replacement) =>
@@ -1287,7 +1334,7 @@
                     replacements.push({
                         start: match.index,
                         end: match.index + match[0].length,
-                        value: replacer(...match)
+                        value: replacer(...match, match.index)
                     });
                 }
                 return replacements.reverse().reduce((result, replacement) =>
@@ -2565,9 +2612,8 @@
             // ============================================================
             function flushPersistence() {
                 if (persistenceFlushed || !editors.html) return;
-                persistenceFlushed = true;
                 syncAllFileState();
-                saveData();
+                persistenceFlushed = saveData(files, activeFileId, false, openFileIds, false);
             }
             window.addEventListener('beforeunload', flushPersistence);
             window.addEventListener('pagehide', () => {
