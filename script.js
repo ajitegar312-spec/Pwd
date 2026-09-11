@@ -819,7 +819,9 @@
                         values.forEach(reference => references.push({ reference, language }));
                     });
                 };
-                add('link[href]', 'href', 'resource');
+                add('link[rel~="stylesheet"][href]', 'href', 'css');
+                add('link:not([rel~="stylesheet"])[href]', 'href', 'resource');
+                add('a[href]', 'href', 'html');
                 add('script[src]', 'src', 'javascript');
                 add('img[src], source[src], video[poster], object[data], iframe[src], audio[src], track[src], embed[src], input[src]',
                     'src', 'resource');
@@ -899,8 +901,8 @@
                         [...content.matchAll(/\b(?:import\s+(?:(?:[A-Za-z_$][\w$]*|\*|\{|\}|,|\s)+?\s*from\s*)?|export\s+(?:[A-Za-z_$][\w$]*|\*|\{|\}|,|\s)+?\s*from\s*)["']([^"']+)["']/g),
                             ...content.matchAll(/\bimport\(\s*["']([^"']+)["']\s*\)/g)].map(m => m[1]) :
                         file.language === 'css' ? [
-                            ...content.matchAll(/@import\s*["']([^"']+)["']/gi)
-                        ].map(m => m[1]) : [];
+                            ...content.matchAll(/@import\s+(?:["']([^"']+)["']|url\(\s*["']?([^"')]+)["']?\s*\))/gi)
+                        ].map(m => m[1] || m[2]) : [];
                     references.forEach(reference => {
                         const language = file.language === 'javascript' ? 'javascript' : 'css';
                         if (!isExternalReference(reference) && isCheckableCodeReference(reference, language) &&
@@ -911,6 +913,8 @@
                     if (file.language === 'css') {
                         [...content.matchAll(/url\(\s*["']?([^"')]+)["']?\s*\)/gi)].forEach(match => {
                             const reference = match[1].trim();
+                            const beforeMatch = content.slice(0, match.index);
+                            if (/@import\s+[^;]*$/i.test(beforeMatch)) return;
                             if (!isExternalReference(reference) && !getAssetFileId(reference, 'resource', './', id, true)) {
                                 broken.push(`${id}: ${reference}`);
                             }
@@ -931,9 +935,9 @@
                 if (file.language === 'html') {
                     const doc = new DOMParser().parseFromString(content, 'text/html');
                     const baseHref = doc.querySelector('base[href]')?.getAttribute('href') || './';
-                    const pattern = /(href|src)=(?:"([^"]+)"|'([^']+)'|([^\s>]+))/gi;
+                    const pattern = /<([a-z][\w:-]*)\b[^>]*?\b(href|src)=(?:"([^"]+)"|'([^']+)'|([^\s>]+))/gi;
                     let match;
-                    while ((match = pattern.exec(content))) callback(match[2] || match[3] || match[4], baseHref, match.index, match[0], match[1]);
+                    while ((match = pattern.exec(content))) callback(match[3] || match[4] || match[5], baseHref, match.index, match[0], match[2], match[1]);
                 } else if (file.language === 'css') {
                     const pattern = /url\(\s*(["']?)([^"')]+)\1\s*\)|@import\s+(?:(["'])([^"']+)\3|url\((["']?)([^"')]+)\5\))/gi;
                     let match;
@@ -947,20 +951,20 @@
 
             function hasSemanticReference(sourceFileId, targetFileId) {
                 let found = false;
-                forEachReference(sourceFileId, (reference, baseHref, index, match, attributeName) => {
-                    const language = getReferenceLanguage(sourceFileId, reference, attributeName);
+                forEachReference(sourceFileId, (reference, baseHref, index, match, attributeName, tagName) => {
+                    const language = getReferenceLanguage(sourceFileId, reference, attributeName, tagName);
                     const allowBare = files[sourceFileId].language !== 'javascript';
                     if (getAssetFileId(reference, language, baseHref, sourceFileId, allowBare) === targetFileId) found = true;
                 });
                 return found;
             }
 
-            function getReferenceLanguage(sourceFileId, reference, attributeName) {
+            function getReferenceLanguage(sourceFileId, reference, attributeName, tagName) {
                 if (files[sourceFileId].language !== 'html') return files[sourceFileId].language;
-                if (attributeName === 'src') return 'javascript';
-                if (attributeName === 'href') return 'html';
-                if (/\.html([?#]|$)/i.test(reference)) return 'html';
-                return 'css';
+                if (attributeName === 'src' && tagName === 'script') return 'javascript';
+                if (attributeName === 'href' && (tagName === 'a' || /\.html([?#]|$)/i.test(reference))) return 'html';
+                if (attributeName === 'href' && (tagName === 'link' || /\.css([?#]|$)/i.test(reference))) return 'css';
+                return 'resource';
             }
 
             function getRelativeVfsPath(sourceFileId, targetFileId, baseHref = './') {
@@ -1765,6 +1769,8 @@
                 });
                 order.forEach(id => {
                     const f = files[id];
+                    const keyMap = { html: 'html', css: 'css', javascript: 'js' };
+                    const editorKey = keyMap[f.language] || 'html';
                     const btn = document.createElement('div');
                     btn.className = 'editor-tab-btn' + (id === activeFileId ? ' active' : '') + (f.dirty ? ' dirty' :
                     '');
@@ -1772,6 +1778,8 @@
                     btn.tabIndex = 0;
                     btn.setAttribute('role', 'tab');
                     btn.setAttribute('aria-selected', id === activeFileId ? 'true' : 'false');
+                    btn.id = `editor-tab-${order.indexOf(id)}`;
+                    btn.setAttribute('aria-controls', `${editorKey}EditorSlot`);
                     const label = document.createElement('span');
                     label.textContent = id;
                     const dot = document.createElement('span');
@@ -1791,6 +1799,13 @@
                         if (event.key === 'Enter' || event.key === ' ') {
                             event.preventDefault();
                             switchFile(id);
+                        } else if (event.key === 'ArrowRight' || event.key === 'ArrowDown' || event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+                            event.preventDefault();
+                            const direction = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : -1;
+                            const nextIndex = (order.indexOf(id) + direction + order.length) % order.length;
+                            const nextTab = editorTabsBar.querySelector(`[data-file="${CSS.escape(order[nextIndex])}"]`);
+                            nextTab?.focus();
+                            switchFile(order[nextIndex]);
                         }
                     };
                     editorTabsBar.appendChild(btn);

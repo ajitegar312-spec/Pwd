@@ -47,9 +47,9 @@
             <div class="editor-area" id="editorArea">
                 <div class="editor-tabs-bar" id="editorTabsBar" role="tablist" aria-label="Open files"></div>
                 <div class="editor-container" id="editorContainer">
-                    <div class="editor-slot active" id="htmlEditorSlot"></div>
-                    <div class="editor-slot" id="cssEditorSlot"></div>
-                    <div class="editor-slot" id="jsEditorSlot"></div>
+                    <div class="editor-slot active" id="htmlEditorSlot" role="tabpanel" aria-label="HTML editor"></div>
+                    <div class="editor-slot" id="cssEditorSlot" role="tabpanel" aria-label="CSS editor"></div>
+                    <div class="editor-slot" id="jsEditorSlot" role="tabpanel" aria-label="JavaScript editor"></div>
                 </div>
             </div>
 
@@ -97,16 +97,16 @@
             <div class="sub">Draft tersimpan otomatis; Save menetapkan versi tersimpan.</div>
             <div class="settings-group">
                 <h3>✏️ Editor</h3>
-                <div class="settings-row"><label>Font Size</label><input type="number" id="fontSize" min="10" max="28" value="14" /></div>
-                <div class="settings-row"><label>Tab Size</label><input type="number" id="tabSize" min="1" max="8" value="2" /></div>
-                <div class="settings-row"><label>Word Wrap</label><select id="wordWrap"><option value="off">Off</option><option value="on" selected>On</option></select></div>
-                <div class="settings-row"><label>Line Numbers</label><select id="lineNumbers"><option value="on" selected>On</option><option value="off">Off</option></select></div>
-                <div class="settings-row"><label>Minimap</label><select id="minimap"><option value="true" selected>On</option><option value="false">Off</option></select></div>
+                <div class="settings-row"><label for="fontSize">Font Size</label><input type="number" id="fontSize" min="10" max="28" value="14" /></div>
+                <div class="settings-row"><label for="tabSize">Tab Size</label><input type="number" id="tabSize" min="1" max="8" value="2" /></div>
+                <div class="settings-row"><label for="wordWrap">Word Wrap</label><select id="wordWrap"><option value="off">Off</option><option value="on" selected>On</option></select></div>
+                <div class="settings-row"><label for="lineNumbers">Line Numbers</label><select id="lineNumbers"><option value="on" selected>On</option><option value="off">Off</option></select></div>
+                <div class="settings-row"><label for="minimap">Minimap</label><select id="minimap"><option value="true" selected>On</option><option value="false">Off</option></select></div>
             </div>
             <div class="settings-group">
                 <h3>🖥️ Preview</h3>
-                <div class="settings-row"><label>Auto Run</label><input type="checkbox" id="autoRun" checked /></div>
-                <div class="settings-row"><label>Refresh Delay</label><div class="range-wrap"><input type="range" id="refreshDelay" min="100" max="800" value="350" step="50" /><span id="refreshDelayValue">350ms</span></div></div>
+                <div class="settings-row"><label for="autoRun">Auto Run</label><input type="checkbox" id="autoRun" checked /></div>
+                <div class="settings-row"><label for="refreshDelay">Refresh Delay</label><div class="range-wrap"><input type="range" id="refreshDelay" min="100" max="800" value="350" step="50" /><span id="refreshDelayValue">350ms</span></div></div>
             </div>
             <div class="modal-actions"><button class="btn-close" id="closeSettingsModal">Tutup</button></div>
         </div>
