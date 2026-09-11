@@ -67,6 +67,7 @@
             const refreshDelayRange = $('refreshDelay');
             const refreshDelayValue = $('refreshDelayValue');
             const mobileSidebarBtn = $('mobileSidebarBtn');
+            const runPythonBtn = $('runPythonBtn');
 
             // ============================================================
             //  STATE
@@ -82,6 +83,9 @@
             const CDN_KEY = 'codeplayground_pro_cdn';
             const THEME_KEY = 'codeplayground_pro_theme';
             const LAYOUT_KEY = 'codeplayground_pro_layout';
+            const PYODIDE_VERSION = '0.26.2';
+            const PYODIDE_SCRIPT_URL = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/pyodide.js`;
+            const PYODIDE_INDEX_URL = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`;
 
             let settings = {
                 fontSize: 14,
@@ -113,6 +117,9 @@
             let persistenceFlushed = false;
             let moduleBundleLimitNotified = false;
             let previewContents = null;
+            let pyodideRuntime = null;
+            let pyodideLoadPromise = null;
+            let pythonRunInProgress = false;
 
             // --- VFS ---
             let files = {};
@@ -1765,6 +1772,76 @@
 
             function toggleConsole() { consoleOpen ? closeConsole() : openConsole(); }
 
+            function loadPyodideRuntime() {
+                if (pyodideRuntime) return Promise.resolve(pyodideRuntime);
+                if (pyodideLoadPromise) return pyodideLoadPromise;
+                pyodideLoadPromise = new Promise((resolve, reject) => {
+                    const finish = () => {
+                        if (typeof window.loadPyodide !== 'function') {
+                            reject(new Error('Pyodide tidak menyediakan loadPyodide'));
+                            return;
+                        }
+                        window.loadPyodide({ indexURL: PYODIDE_INDEX_URL }).then(runtime => {
+                            pyodideRuntime = runtime;
+                            resolve(runtime);
+                        }).catch(reject);
+                    };
+                    if (typeof window.loadPyodide === 'function') {
+                        finish();
+                        return;
+                    }
+                    const script = document.createElement('script');
+                    script.src = PYODIDE_SCRIPT_URL;
+                    script.async = true;
+                    script.onload = finish;
+                    script.onerror = () => reject(new Error('Library Pyodide gagal dimuat'));
+                    document.head.appendChild(script);
+                }).catch(error => {
+                    pyodideLoadPromise = null;
+                    throw error;
+                });
+                return pyodideLoadPromise;
+            }
+
+            function getPythonEntryFile() {
+                if (files[activeFileId]?.language === 'python') return files[activeFileId];
+                const mainFile = Object.values(files).find(file => file.language === 'python' && file === files['main.py']);
+                return mainFile || Object.values(files).find(file => file.language === 'python') || null;
+            }
+
+            async function runPythonCode() {
+                if (pythonRunInProgress) return;
+                const file = getPythonEntryFile();
+                if (!file) {
+                    showToast('⚠️ Belum ada file Python');
+                    return;
+                }
+                const source = file.committedContent;
+                pythonRunInProgress = true;
+                runPythonBtn.disabled = true;
+                const originalLabel = runPythonBtn.querySelector('span')?.textContent || 'Python';
+                if (runPythonBtn.querySelector('span')) runPythonBtn.querySelector('span').textContent = 'Loading';
+                openConsole();
+                addConsoleEntry('info', `Python: ${activeFileId === Object.keys(files).find(id => files[id] === file) ? activeFileId : 'main.py'}`);
+                try {
+                    const runtime = await loadPyodideRuntime();
+                    runtime.setStdout({ batched: text => addConsoleEntry('info', text) });
+                    runtime.setStderr({ batched: text => addConsoleEntry('error', text) });
+                    if (typeof runtime.loadPackagesFromImports === 'function') await runtime.loadPackagesFromImports(source);
+                    if (runPythonBtn.querySelector('span')) runPythonBtn.querySelector('span').textContent = 'Running';
+                    const result = await runtime.runPythonAsync(source);
+                    if (result && typeof result.destroy === 'function') result.destroy();
+                    addConsoleEntry('info', 'Python selesai');
+                } catch (error) {
+                    addConsoleEntry('error', `Python gagal: ${error?.message || error}`);
+                    showToast('⚠️ Eksekusi Python gagal');
+                } finally {
+                    pythonRunInProgress = false;
+                    runPythonBtn.disabled = false;
+                    if (runPythonBtn.querySelector('span')) runPythonBtn.querySelector('span').textContent = originalLabel;
+                }
+            }
+
             window.addEventListener('message', e => {
                 const data = e.data;
                 if (e.source !== previewIframe.contentWindow || !data || data.token !== previewSessionToken ||
@@ -2390,6 +2467,7 @@
             // ============================================================
             const commands = [
                 { id: 'run', label: 'Jalankan kode', icon: 'fa-play', shortcut: 'Ctrl+Enter', action: runCode },
+                { id: 'runpython', label: 'Jalankan Python', icon: 'fa-python', shortcut: '', action: runPythonCode },
                 { id: 'save', label: 'Simpan semua', icon: 'fa-save', shortcut: 'Ctrl+S', action: () => saveAll(true) },
                 { id: 'format', label: 'Format kode (Monaco)', icon: 'fa-magic', shortcut: '', action: formatCode },
                 { id: 'newfile', label: 'Buat file baru', icon: 'fa-plus', shortcut: '', action: createNewFile },
@@ -2689,6 +2767,7 @@
             //  EVENT BINDING
             // ============================================================
             runBtn.addEventListener('click', runCode);
+            runPythonBtn.addEventListener('click', runPythonCode);
             saveBtn.addEventListener('click', () => saveAll(true));
             downloadBtn.addEventListener('click', downloadProject);
             uploadBtn.addEventListener('click', uploadFile);
