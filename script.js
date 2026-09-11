@@ -63,7 +63,7 @@
             const wordWrapSelect = $('wordWrap');
             const lineNumbersSelect = $('lineNumbers');
             const minimapSelect = $('minimap');
-            const autoRunCheck = $('autoRun');
+            const autoSaveCheck = $('autoSave');
             const refreshDelayRange = $('refreshDelay');
             const refreshDelayValue = $('refreshDelayValue');
             const mobileSidebarBtn = $('mobileSidebarBtn');
@@ -89,7 +89,7 @@
                 wordWrap: 'on',
                 lineNumbers: 'on',
                 minimap: true,
-                autoRun: true,
+                autoSave: true,
                 refreshDelay: 350
             };
             let theme = 'light';
@@ -282,7 +282,8 @@
                         if (['on', 'off', 'relative', 'interval'].includes(s.lineNumbers)) settings.lineNumbers = s
                         .lineNumbers;
                         if (typeof s.minimap === 'boolean') settings.minimap = s.minimap;
-                        if (typeof s.autoRun === 'boolean') settings.autoRun = s.autoRun;
+                        if (typeof s.autoSave === 'boolean') settings.autoSave = s.autoSave;
+                        else if (typeof s.autoRun === 'boolean') settings.autoSave = s.autoRun;
                         if (typeof s.refreshDelay === 'number') settings.refreshDelay = clampNumber(s.refreshDelay, 100, 800, 350);
                     }
                 } catch (err) {
@@ -309,7 +310,7 @@
                 wordWrapSelect.value = settings.wordWrap;
                 lineNumbersSelect.value = settings.lineNumbers;
                 minimapSelect.value = settings.minimap ? 'true' : 'false';
-                autoRunCheck.checked = settings.autoRun;
+                autoSaveCheck.checked = settings.autoSave;
                 refreshDelayRange.value = settings.refreshDelay;
                 refreshDelayValue.textContent = settings.refreshDelay + 'ms';
             }
@@ -1687,9 +1688,9 @@
             }
 
             function scheduleUpdate() {
-                if (!settings.autoRun) return;
+                if (!settings.autoSave) return;
                 if (updateTimer) clearTimeout(updateTimer);
-                updateTimer = setTimeout(() => { buildPreview();
+                updateTimer = setTimeout(() => { saveAll(false);
                     updateTimer = null; }, settings.refreshDelay);
             }
 
@@ -2726,7 +2727,7 @@
                 saveSettings(); });
             minimapSelect.addEventListener('change', () => { settings.minimap = minimapSelect.value === 'true';
                 saveSettings(); });
-            autoRunCheck.addEventListener('change', () => { settings.autoRun = autoRunCheck.checked;
+            autoSaveCheck.addEventListener('change', () => { settings.autoSave = autoSaveCheck.checked;
                 saveSettings(); });
             refreshDelayRange.addEventListener('input', function() {
                 refreshDelayValue.textContent = this.value + 'ms';
