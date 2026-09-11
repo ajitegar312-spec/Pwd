@@ -123,6 +123,7 @@
             const PYTHON_PROJECT_DIR = '/codeplayground';
             let pythonFsPaths = new Set();
             let pythonFsDirectories = new Set();
+            let pythonModuleRoots = new Set();
 
             // --- VFS ---
             let files = {};
@@ -602,11 +603,14 @@
             }
 
             function getModuleSpecifiers(content) {
-                return [
+                const mask = createJavaScriptCodeMask(content);
+                const matches = [
                     ...content.matchAll(/\bimport\s+(?:(?:(?:[A-Za-z_$][\w$]*|\*|\{|\}|,|\s|["'][^"']+["'])+?)\s*from\s*)?["']([^"']+)["']/g),
                     ...content.matchAll(/\bexport\s+(?:\*\s+as\s+[A-Za-z_$][\w$]*|\*|\{[\s\S]*?\})\s*from\s*["']([^"']+)["']/g),
-                    ...content.matchAll(/\bimport\s*\(\s*["']([^"']+)["']\s*\)/g)
-                ].map(match => match[1]);
+                    ...content.matchAll(/\bimport\s*\(\s*["']([^"']+)["']\s*\)/g),
+                    ...content.matchAll(/\bimport\s*\(\s*`([^`$]*)`\s*\)/g)
+                ];
+                return matches.filter(match => isJavaScriptCodePosition(content, match.index, mask)).map(match => match[1]);
             }
 
             function resolveDependency(reference, language, baseHref, sourceFileId, allowBare = false) {
@@ -714,6 +718,20 @@
                 return null;
             }
 
+            function readJavaScriptStaticTemplate(source, index) {
+                if (source[index] !== '`') return null;
+                for (let cursor = index + 1; cursor < source.length; cursor += 1) {
+                    if (source[cursor] === '\\') {
+                        cursor += 1;
+                    } else if (source[cursor] === '$' && source[cursor + 1] === '{') {
+                        return null;
+                    } else if (source[cursor] === '`') {
+                        return { start: index + 1, end: cursor, value: source.slice(index + 1, cursor), next: cursor + 1 };
+                    }
+                }
+                return null;
+            }
+
             function skipJavaScriptTemplate(source, index) {
                 const mask = createJavaScriptCodeMask(source);
                 for (let cursor = index + 1; cursor < source.length; cursor += 1) {
@@ -722,12 +740,37 @@
                 return source.length;
             }
 
+            function findJavaScriptTemplateExpressions(source, index) {
+                const mask = createJavaScriptCodeMask(source);
+                const expressions = [];
+                for (let cursor = index + 1; cursor < source.length; cursor += 1) {
+                    if (source[cursor] !== '$' || source[cursor + 1] !== '{') continue;
+                    const start = cursor + 2;
+                    let depth = 1;
+                    for (let expressionCursor = start; expressionCursor < source.length; expressionCursor += 1) {
+                        if (!mask[expressionCursor]) continue;
+                        if (source[expressionCursor] === '{') depth += 1;
+                        else if (source[expressionCursor] === '}' && --depth === 0) {
+                            expressions.push({ start, end: expressionCursor });
+                            cursor = expressionCursor;
+                            break;
+                        }
+                    }
+                }
+                return expressions;
+            }
+
             function findNativeModuleSpecifiers(source) {
                 const result = [];
                 for (let index = 0; index < source.length;) {
                     index = skipJavaScriptTrivia(source, index);
                     if (index >= source.length) break;
                     if (source[index] === '`') {
+                        findJavaScriptTemplateExpressions(source, index).forEach(expression => {
+                            findNativeModuleSpecifiers(source.slice(expression.start, expression.end)).forEach(specifier => {
+                                result.push({ ...specifier, start: specifier.start + expression.start, end: specifier.end + expression.start });
+                            });
+                        });
                         index = skipJavaScriptTemplate(source, index);
                         continue;
                     }
@@ -748,7 +791,8 @@
                         const cursor = skipJavaScriptTrivia(source, index);
                         if (source[cursor] === '.') continue;
                         if (source[cursor] === '(') {
-                            const string = readJavaScriptString(source, skipJavaScriptTrivia(source, cursor + 1));
+                            const argument = skipJavaScriptTrivia(source, cursor + 1);
+                            const string = readJavaScriptString(source, argument) || readJavaScriptStaticTemplate(source, argument);
                             if (string) result.push(string);
                             continue;
                         }
@@ -759,9 +803,12 @@
                         }
                     }
                     let cursor = index;
+                    let nesting = 0;
                     while (cursor < source.length) {
                         cursor = skipJavaScriptTrivia(source, cursor);
-                        if (source[cursor] === ';' || source[cursor] === '\n') break;
+                        if (source[cursor] === ';') break;
+                        if ('([{'.includes(source[cursor])) nesting += 1;
+                        else if (')]}'.includes(source[cursor])) nesting = Math.max(0, nesting - 1);
                         if (/[A-Za-z_$]/.test(source[cursor])) {
                             const fromStart = cursor;
                             while (isJavaScriptIdentifierChar(source[cursor])) cursor += 1;
@@ -1195,10 +1242,9 @@
                 visit(entryFileId, entryBaseHref);
                 const unsupported = [...modules.entries()].flatMap(([fileId, content]) =>
                     getModuleSpecifiers(content).filter(specifier => !getAssetFileId(specifier, 'javascript', fileId === entryFileId ? entryBaseHref : './', fileId))
-                        .filter(specifier => isLocalVfsReference(specifier))
                         .map(specifier => `${fileId}: ${specifier}`));
                 if (unsupported.length) {
-                    addConsoleEntry('error', 'Local module tidak ditemukan: ' + unsupported.join(', '));
+                    addConsoleEntry('error', 'Module tidak dapat dibundle. Pastikan semua import tersedia di project: ' + unsupported.join(', '));
                     return '';
                 }
                 const bundle = createBundleSource(modules, entryFileId, entryBaseHref);
@@ -1454,6 +1500,10 @@
                     const dependency = getAssetFileId(specifier, 'javascript', baseHref, fileId);
                     return dependency ? `Promise.resolve(__require(${JSON.stringify(dependency)}))` : match;
                 });
+                content = replaceJavaScriptMatches(content, /\bimport\(\s*`([^`$]*)`\s*\)/g, (match, specifier) => {
+                    const dependency = getAssetFileId(specifier, 'javascript', baseHref, fileId);
+                    return dependency ? `Promise.resolve(__require(${JSON.stringify(dependency)}))` : match;
+                });
                 const exportAssignments = [...new Set(exportedDeclarations)].map(name => `__exports.${name} = ${name};`);
                 const reexportAssignments = reexports.map(reexport => {
                     const required = `__require(${JSON.stringify(reexport.dependency)})`;
@@ -1472,10 +1522,9 @@
             function createBundleSource(modules, entryFileId, entryBaseHref = './') {
                 const unsupported = [...modules.entries()].flatMap(([fileId, content]) =>
                     getModuleSpecifiers(content).filter(specifier => !getAssetFileId(specifier, 'javascript', fileId === entryFileId ? entryBaseHref : './', fileId))
-                        .filter(specifier => isLocalVfsReference(specifier))
                         .map(specifier => `${fileId}: ${specifier}`));
                 if (unsupported.length) {
-                    addConsoleEntry('error', 'Local module tidak ditemukan: ' + unsupported.join(', '));
+                    addConsoleEntry('error', 'Module tidak dapat dibundle. Pastikan semua import tersedia di project: ' + unsupported.join(', '));
                     return '';
                 }
                 const factories = [...modules.entries()].map(([fileId, content]) =>
@@ -1832,21 +1881,31 @@
                     const parts = filePath.split('/');
                     parts.pop();
                     for (let index = 1; index <= parts.length; index += 1) {
-                        if (filePaths.has(parts.slice(0, index).join('/'))) {
-                            throw new Error(`Konflik path Python: ${parts.slice(0, index).join('/')} adalah file dan folder`);
+                        const ancestor = parts.slice(0, index).join('/');
+                        if (filePaths.has(ancestor) || filePaths.has(`${ancestor}.py`)) {
+                            throw new Error(`Konflik path Python: ${ancestor} adalah file dan folder`);
                         }
                     }
                 });
-                pythonFsPaths.forEach(filePath => {
-                    if (!filePaths.has(filePath)) {
-                        try { runtime.FS.unlink(`${PYTHON_PROJECT_DIR}/${filePath}`); } catch (_) {}
-                    }
-                });
-                [...pythonFsDirectories].sort((left, right) => right.length - left.length).forEach(directoryPath => {
-                    if (!directoryPaths.has(directoryPath) || filePaths.has(directoryPath)) {
-                        try { runtime.FS.rmdir(`${PYTHON_PROJECT_DIR}/${directoryPath}`); } catch (_) {}
-                    }
-                });
+                const moduleRoots = new Set([...pythonModuleRoots, ...filePaths, ...directoryPaths]
+                    .map(filePath => filePath.split('/')[0].replace(/\.py$/i, '')));
+                const removeDirectoryContents = path => {
+                    let entries = [];
+                    try { entries = runtime.FS.readdir(path); } catch (_) { return; }
+                    entries.filter(entry => entry !== '.' && entry !== '..').forEach(entry => {
+                        const child = `${path}/${entry}`;
+                        try {
+                            const stat = runtime.FS.stat(child);
+                            if (runtime.FS.isDir(stat.mode)) {
+                                removeDirectoryContents(child);
+                                runtime.FS.rmdir(child);
+                            } else {
+                                runtime.FS.unlink(child);
+                            }
+                        } catch (_) {}
+                    });
+                };
+                removeDirectoryContents(PYTHON_PROJECT_DIR);
                 runtime.FS.mkdirTree(PYTHON_PROJECT_DIR);
                 const currentPaths = new Set();
                 directoryPaths.forEach(directoryPath => {
@@ -1870,14 +1929,20 @@
                 });
                 pythonFsPaths = currentPaths;
                 pythonFsDirectories = directoryPaths;
+                pythonModuleRoots = moduleRoots;
                 const importDirectories = [...directoryPaths]
                     .sort((left, right) => left.split('/').length - right.split('/').length)
                     .map(directoryPath => `${PYTHON_PROJECT_DIR}/${directoryPath}`);
-                await runtime.runPythonAsync(`import sys\nimport_directories = ${JSON.stringify([PYTHON_PROJECT_DIR, ...importDirectories])}\nfor directory in import_directories:\n    while directory in sys.path:\n        sys.path.remove(directory)\nfor directory in reversed(import_directories):\n    sys.path.insert(0, directory)`);
+                await runtime.runPythonAsync(`import sys\nimport_directories = ${JSON.stringify([PYTHON_PROJECT_DIR, ...importDirectories])}\nfor directory in import_directories:\n    while directory in sys.path:\n        sys.path.remove(directory)\nfor directory in reversed(import_directories):\n    sys.path.insert(0, directory)\nlocal_roots = ${JSON.stringify([...moduleRoots])}\nfor module_name in list(sys.modules):\n    if module_name.split('.')[0] in local_roots:\n        del sys.modules[module_name}`);
             }
 
             function getPythonExternalImportSource(source, localModuleNames) {
-                return source.split('\n').map(line => {
+                const sourceForDiscovery = source.replace(/\\\r?\n\s*/g, ' ');
+                const localFromImportPattern = /^\s*from\s+(\.*(?:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)?)\s+import\s*(?:\([^)]*\)|[^\n]*)/gm;
+                const filteredSource = sourceForDiscovery.replace(localFromImportPattern, (match, moduleName) => {
+                    return moduleName.startsWith('.') || localModuleNames.has(moduleName.split('.')[0]) ? '' : match;
+                });
+                const filteredLines = filteredSource.split('\n').map(line => {
                     const fromMatch = line.match(/^(\s*from\s+)(\.*(?:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)?)/);
                     if (fromMatch && (fromMatch[2].startsWith('.') || localModuleNames.has(fromMatch[2].split('.')[0]))) return '';
                     const importMatch = line.match(/^(\s*import\s+)(.+)$/);
@@ -1888,6 +1953,62 @@
                     });
                     return imports.length ? importMatch[1] + imports.join(',') : '';
                 }).join('\n');
+                const codeMask = createPythonCodeMask(filteredSource);
+                const dynamicNames = new Set(['importlib.import_module', '__import__']);
+                [...filteredSource.matchAll(/\bimport\s+importlib\s+as\s+([A-Za-z_]\w*)/g)].forEach(match => {
+                    if (codeMask[match.index]) dynamicNames.add(`${match[1]}.import_module`);
+                });
+                [...filteredSource.matchAll(/\bfrom\s+importlib\s+import\s+import_module(?:\s+as\s+([A-Za-z_]\w*))?/g)].forEach(match => {
+                    if (codeMask[match.index]) dynamicNames.add(match[1] || 'import_module');
+                });
+                [...filteredSource.matchAll(/\bfrom\s+importlib\s+import\s*\(\s*import_module(?:\s+as\s+([A-Za-z_]\w*))?\s*\)/g)].forEach(match => {
+                    if (codeMask[match.index]) dynamicNames.add(match[1] || 'import_module');
+                });
+                [...filteredSource.matchAll(/\bfrom\s+builtins\s+import\s+__import__(?:\s+as\s+([A-Za-z_]\w*))?/g)].forEach(match => {
+                    if (codeMask[match.index]) dynamicNames.add(match[1] || '__import__');
+                });
+                [...filteredSource.matchAll(/\bfrom\s+builtins\s+import\s*\(\s*__import__(?:\s+as\s+([A-Za-z_]\w*))?\s*\)/g)].forEach(match => {
+                    if (codeMask[match.index]) dynamicNames.add(match[1] || '__import__');
+                });
+                [...filteredSource.matchAll(/\bimport\s+builtins\s+as\s+([A-Za-z_]\w*)/g)].forEach(match => {
+                    if (codeMask[match.index]) dynamicNames.add(`${match[1]}.__import__`);
+                });
+                const escapedNames = [...dynamicNames].map(name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+                const dynamicPattern = new RegExp(`\\b(?:${escapedNames.join('|')})\\s*\\(\\s*["']([A-Za-z_]\\w*(?:\\.[A-Za-z_]\\w*)*)["']`, 'g');
+                const dynamicImports = [...filteredSource.matchAll(dynamicPattern)]
+                    .filter(match => codeMask[match.index])
+                    .map(match => match[1].split('.')[0])
+                    .filter(moduleName => !localModuleNames.has(moduleName));
+                return `${filteredLines}\n${[...new Set(dynamicImports)].map(moduleName => `import ${moduleName}`).join('\n')}`;
+            }
+
+            function createPythonCodeMask(source) {
+                const mask = new Array(source.length).fill(false);
+                let index = 0;
+                while (index < source.length) {
+                    if (source[index] === '#') {
+                        index = source.indexOf('\n', index + 1);
+                        if (index === -1) break;
+                        continue;
+                    }
+                    if (source[index] === '"' || source[index] === "'") {
+                        const quote = source[index];
+                        const triple = source.slice(index, index + 3) === quote.repeat(3);
+                        const closing = triple ? quote.repeat(3) : quote;
+                        index += triple ? 3 : 1;
+                        while (index < source.length) {
+                            if (source[index] === '\\') index += 2;
+                            else if (source.slice(index, index + closing.length) === closing) {
+                                index += closing.length;
+                                break;
+                            } else index += 1;
+                        }
+                        continue;
+                    }
+                    mask[index] = true;
+                    index += 1;
+                }
+                return mask;
             }
 
             function getPythonModuleName(fileId) {
