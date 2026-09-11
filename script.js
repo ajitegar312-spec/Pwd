@@ -335,10 +335,8 @@
             const ALLOWED_CDN_DOMAINS = [
                 'cdnjs.cloudflare.com',
                 'unpkg.com',
-                'jsdelivr.net',
-                'cdn.tailwindcss.com',
                 'cdn.jsdelivr.net',
-                'cdnjs.com'
+                'cdn.tailwindcss.com'
             ];
 
             function loadCdn() {
@@ -364,7 +362,7 @@
                     if (u.protocol !== 'https:') return false;
                     const host = u.hostname;
                     for (const d of ALLOWED_CDN_DOMAINS) {
-                        if (host === d || host.endsWith('.' + d)) return true;
+                        if (host === d) return true;
                     }
                     return false;
                 } catch (_) { return false; }
@@ -591,7 +589,7 @@
 
             function getModuleSpecifiers(content) {
                 return [
-                    ...content.matchAll(/\bimport\s+(?:(?:(?:[A-Za-z_$][\w$]*|\*|\{|\}|,|\s)+?)\s*from\s*)?["']([^"']+)["']/g),
+                    ...content.matchAll(/\bimport\s+(?:(?:(?:[A-Za-z_$][\w$]*|\*|\{|\}|,|\s|["'][^"']+["'])+?)\s*from\s*)?["']([^"']+)["']/g),
                     ...content.matchAll(/\bexport\s+(?:\*\s+as\s+[A-Za-z_$][\w$]*|\*|\{[\s\S]*?\})\s*from\s*["']([^"']+)["']/g),
                     ...content.matchAll(/\bimport\s*\(\s*["']([^"']+)["']\s*\)/g)
                 ].map(match => match[1]);
@@ -810,7 +808,13 @@
                 let match;
                 while ((match = declarationPattern.exec(content))) {
                     if (!isJavaScriptCodePosition(content, match.index, mask)) continue;
-                    match[1].split(',').forEach(declaration => addBindingNames(declaration.split('=', 1)[0]));
+                    const declaration = match[1].split(/;|\n(?=\s*(?:const|let|var)\b)/, 1)[0];
+                    const bindingPattern = declaration.replace(/\s*=\s*[\s\S]*$/, '').trim();
+                    if (/^[{[]/.test(bindingPattern)) {
+                        addBindingNames(bindingPattern);
+                    } else {
+                        splitBindingParts(declaration).forEach(part => addBindingNames(part));
+                    }
                 }
                 for (const declaration of content.matchAll(/\bexport\s+(?:(?:async)\s+)?(?:function|class)\s+([A-Za-z_$][\w$]*)/g)) {
                     if (isJavaScriptCodePosition(content, declaration.index, mask)) names.push(declaration[1]);
@@ -1015,16 +1019,19 @@
             }
 
             function getRelativeVfsPath(sourceFileId, targetFileId, baseHref = './') {
-                const sourcePath = getReferenceBaseHref(sourceFileId, baseHref).pathname;
-                const sourceParts = sourcePath.split('/').filter(Boolean);
-                sourceParts.pop();
+                const sourceDirectory = getReferenceBaseHref(sourceFileId, baseHref).pathname;
+                const sourceParts = sourceDirectory.split('/').filter(Boolean);
                 const targetParts = normalizeVfsPath(targetFileId).split('/').filter(Boolean);
-                targetParts.pop();
-                while (sourceParts.length && targetParts.length && sourceParts[0] === targetParts[0]) {
-                    sourceParts.shift();
-                    targetParts.shift();
+                let commonLength = 0;
+                while (commonLength < sourceParts.length && commonLength < targetParts.length &&
+                    sourceParts[commonLength] === targetParts[commonLength]) {
+                    commonLength += 1;
                 }
-                return [...sourceParts.map(() => '..'), ...targetParts, normalizeVfsPath(targetFileId).split('/').pop()].join('/') || './';
+                const relativeParts = [
+                    ...sourceParts.slice(commonLength).map(() => '..'),
+                    ...targetParts.slice(commonLength)
+                ];
+                return relativeParts.join('/') || './';
             }
 
             function rewriteReferences(oldName, newName) {
@@ -1377,6 +1384,14 @@
                     reexports.push({ dependency, all: true });
                     return '';
                 });
+                const normalizeExportName = name => {
+                    const value = name.trim();
+                    if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) ||
+                        (value.startsWith("'") && value.endsWith("'")))) {
+                        return value.slice(1, -1);
+                    }
+                    return value;
+                };
                 const prelude = imports.map(({ clause, dependency }) => {
                     const required = `__require(${JSON.stringify(dependency)})`;
                     const lines = [];
@@ -1388,8 +1403,10 @@
                     if (namedMatch) {
                         namedMatch[1].split(',').map(item => item.trim()).filter(Boolean).forEach(item => {
                             const [remote, local] = item.split(/\s+as\s+/).map(value => value.trim());
-                            if (/^[A-Za-z_$][\w$]*$/.test(remote) && (!local || /^[A-Za-z_$][\w$]*$/.test(local))) {
-                                lines.push(`const ${local || remote} = ${required}.${remote};`);
+                            const remoteName = normalizeExportName(remote);
+                            const localName = local || remoteName;
+                            if (remoteName && /^[A-Za-z_$][\w$]*$/.test(localName)) {
+                                lines.push(`const ${localName} = ${required}[${JSON.stringify(remoteName)}];`);
                             } else {
                                 addConsoleEntry('error', `Import tidak didukung di ${fileId}: ${item}`);
                             }
@@ -1402,6 +1419,7 @@
                 }).join('\n');
                 content = replaceJavaScriptMatches(content, /export\s+default\s+/g, () => '__exports.default = ');
                 exportedDeclarations.push(...getExportedDeclarationNames(content));
+                content = replaceJavaScriptMatches(content, /export\s+(const|let|var)\s+(?=[{[])/g, (match, kind) => `${kind} `);
                 content = replaceJavaScriptMatches(content, /export\s+(const|let|var)\s+((?:\{[^}]+\}|\[[^\]]+\]))\s*=/g, (match, kind, pattern) => `${kind} ${pattern} =`);
                 content = replaceJavaScriptMatches(content, /export\s+(const|let|var)\s+([A-Za-z_$][\w$]*)/g, (match, kind, name) => `${kind} ${name}`);
                 content = replaceJavaScriptMatches(content, /export\s+(async\s+)?function\s+([A-Za-z_$][\w$]*)/g, (match, asyncKeyword, name) => `${asyncKeyword || ''}function ${name}`);
@@ -1410,7 +1428,11 @@
                 content = replaceJavaScriptMatches(content, /export\s*\{([^}]+)\}\s*;?/g, (match, names) => {
                     names.split(',').map(item => item.trim()).filter(Boolean).forEach(item => {
                         const [local, exported] = item.split(/\s+as\s+/);
-                        exportedNames.push(`__exports.${exported || local} = ${local};`);
+                        const exportName = normalizeExportName(exported || local);
+                        const localName = local.trim();
+                        if (/^[A-Za-z_$][\w$]*$/.test(localName) && exportName) {
+                            exportedNames.push(`__exports[${JSON.stringify(exportName)}] = ${localName};`);
+                        }
                     });
                     return '';
                 });
@@ -1421,11 +1443,13 @@
                 const exportAssignments = [...new Set(exportedDeclarations)].map(name => `__exports.${name} = ${name};`);
                 const reexportAssignments = reexports.map(reexport => {
                     const required = `__require(${JSON.stringify(reexport.dependency)})`;
-                    if (reexport.name) return `__exports.${reexport.name} = ${required};`;
+                    if (reexport.name) return `__exports[${JSON.stringify(reexport.name)}] = ${required};`;
                     if (reexport.all) return `Object.keys(${required}).forEach(key => { if (key !== 'default' && key !== '__esModule') __exports[key] = ${required}[key]; });`;
                     return reexport.names.split(',').map(item => {
                         const [remote, local] = item.trim().split(/\s+as\s+/);
-                        return `__exports.${local || remote} = ${required}.${remote};`;
+                        const remoteName = normalizeExportName(remote);
+                        const localName = normalizeExportName(local || remote);
+                        return `__exports[${JSON.stringify(localName)}] = ${required}[${JSON.stringify(remoteName)}];`;
                     }).join('\n');
                 });
                 return `${prelude}\n${content}\n${exportedNames.join('\n')}\n${exportAssignments.join('\n')}\n${reexportAssignments.join('\n')}`;
@@ -1845,6 +1869,7 @@
                     btn.appendChild(close);
                     btn.onclick = () => switchFile(id);
                     btn.onkeydown = event => {
+                        if (event.target.closest?.('.close-tab')) return;
                         if (event.key === 'Enter' || event.key === ' ') {
                             event.preventDefault();
                             switchFile(id);
@@ -1852,7 +1877,8 @@
                             event.preventDefault();
                             const direction = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : -1;
                             const nextIndex = (order.indexOf(id) + direction + order.length) % order.length;
-                            const nextTab = editorTabsBar.querySelector(`[data-file="${CSS.escape(order[nextIndex])}"]`);
+                            const nextTab = Array.from(editorTabsBar.querySelectorAll('[data-file]'))
+                                .find(tab => tab.dataset.file === order[nextIndex]);
                             nextTab?.focus();
                             switchFile(order[nextIndex]);
                         }
@@ -2261,6 +2287,12 @@
                     showToast(`📄 ${name} dimuat`);
                     fileInput.value = '';
                 };
+                const resetUpload = message => {
+                    fileInput.value = '';
+                    if (message) showToast(message);
+                };
+                reader.onerror = () => resetUpload('⚠️ Gagal membaca file');
+                reader.onabort = () => resetUpload('⚠️ Pembacaan file dibatalkan');
                 if (isCode) reader.readAsText(file);
                 else reader.readAsDataURL(file);
             });
